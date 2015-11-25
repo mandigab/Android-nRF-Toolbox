@@ -1,4 +1,4 @@
 include ':app', ':wear', ':common'
 
 include ':dfu'
-project(':dfu').projectDir = file('../DFULibrary/dfu')
+project(':dfu').projectDir = file('../Android-DFU-Library/dfu')
