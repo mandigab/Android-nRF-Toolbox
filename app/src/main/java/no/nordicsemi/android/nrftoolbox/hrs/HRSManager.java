@@ -26,15 +26,15 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
 
+import java.util.Deque;
 import java.util.LinkedList;
-import java.util.Queue;
 import java.util.UUID;
 
 import no.nordicsemi.android.log.Logger;
 import no.nordicsemi.android.nrftoolbox.R;
-import no.nordicsemi.android.nrftoolbox.profile.BleManager;
 import no.nordicsemi.android.nrftoolbox.parser.BodySensorLocationParser;
 import no.nordicsemi.android.nrftoolbox.parser.HeartRateMeasurementParser;
+import no.nordicsemi.android.nrftoolbox.profile.BleManager;
 
 /**
  * HRSManager class performs BluetoothGatt operations for connection, service discovery, enabling notification and reading characteristics. All operations required to connect to device with BLE HR
@@ -74,11 +74,11 @@ public class HRSManager extends BleManager<HRSManagerCallbacks> {
 	private final BleManagerGattCallback mGattCallback = new BleManagerGattCallback() {
 
 		@Override
-		protected Queue<Request> initGatt(final BluetoothGatt gatt) {
+		protected Deque<Request> initGatt(final BluetoothGatt gatt) {
 			final LinkedList<Request> requests = new LinkedList<>();
 			if (mHRLocationCharacteristic != null)
-				requests.push(Request.newReadRequest(mHRLocationCharacteristic));
-			requests.push(Request.newEnableNotificationsRequest(mHRCharacteristic));
+				requests.add(Request.newReadRequest(mHRLocationCharacteristic));
+			requests.add(Request.newEnableNotificationsRequest(mHRCharacteristic));
 			return requests;
 		}
 
@@ -102,12 +102,11 @@ public class HRSManager extends BleManager<HRSManagerCallbacks> {
 
 		@Override
 		public void onCharacteristicRead(final BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
-			if (mLogSession != null)
-				Logger.a(mLogSession, BodySensorLocationParser.parse(characteristic));
+			Logger.a(mLogSession, "\"" + BodySensorLocationParser.parse(characteristic) + "\" received");
 
 			final String sensorPosition = getBodySensorPosition(characteristic.getValue()[0]);
 			//This will send callback to HRSActivity when HR sensor position on body is found in HR device
-			mCallbacks.onHRSensorPositionFound(sensorPosition);
+			mCallbacks.onHRSensorPositionFound(gatt.getDevice(), sensorPosition);
 		}
 
 		@Override
@@ -118,8 +117,7 @@ public class HRSManager extends BleManager<HRSManagerCallbacks> {
 
 		@Override
 		public void onCharacteristicNotified(final BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
-			if (mLogSession != null)
-				Logger.a(mLogSession, HeartRateMeasurementParser.parse(characteristic));
+			Logger.a(mLogSession, "\"" + HeartRateMeasurementParser.parse(characteristic) + "\" received");
 
 			int hrValue;
 			if (isHeartRateInUINT16(characteristic.getValue()[0])) {
@@ -128,7 +126,7 @@ public class HRSManager extends BleManager<HRSManagerCallbacks> {
 				hrValue = characteristic.getIntValue(BluetoothGattCharacteristic.FORMAT_UINT8, 1);
 			}
 			//This will send callback to HRSActivity when new HR value is received from HR device
-			mCallbacks.onHRValueReceived(hrValue);
+			mCallbacks.onHRValueReceived(gatt.getDevice(), hrValue);
 		}
 	};
 

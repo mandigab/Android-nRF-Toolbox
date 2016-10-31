@@ -1,4 +1,10 @@
 include ':app', ':wear', ':common'
 
+<<<<<<< HEAD
 include ':dfu'
 project(':dfu').projectDir = file('../Android-DFU-Library/dfu')
+=======
+// Uncomment these lines if you want to import the DFULibrary as a project, not from jcenter
+// include ':dfu'
+// project(':dfu').projectDir = file('../DFULibrary/dfu')
+>>>>>>> NordicSemiconductor/master

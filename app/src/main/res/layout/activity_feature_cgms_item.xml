@@ -20,7 +20,35 @@
   ~ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
   ~ USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   -->
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@drawable/ic_feature_small_bg" />
-    <item android:drawable="@drawable/ic_mcp_feature_fg" />
-</layer-list>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+	android:layout_width="match_parent"
+	android:layout_height="?android:attr/listPreferredItemHeightSmall"
+	android:paddingBottom="2dp"
+	android:paddingEnd="8dp"
+	android:paddingStart="8dp"
+	android:paddingTop="2dp">
+
+	<TextView
+		android:id="@+id/time"
+		android:layout_width="wrap_content"
+		android:layout_height="wrap_content"
+		android:textAppearance="?android:attr/textAppearanceListItem"/>
+
+	<TextView
+		android:id="@+id/details"
+		android:layout_width="wrap_content"
+		android:layout_height="wrap_content"
+		android:layout_below="@+id/time"
+		android:layout_marginTop="2dp"
+		android:textAppearance="?android:attr/textAppearanceSmall"
+		android:textSize="12sp"/>
+
+	<TextView
+		android:id="@+id/cgms_concentration"
+		android:layout_width="wrap_content"
+		android:layout_height="wrap_content"
+		android:layout_alignParentRight="true"
+		android:layout_centerVertical="true"
+		android:textAppearance="?android:attr/textAppearanceLarge"/>
+
+</RelativeLayout>

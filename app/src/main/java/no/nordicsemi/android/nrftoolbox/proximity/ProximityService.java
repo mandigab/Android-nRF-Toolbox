@@ -24,6 +24,8 @@ package no.nordicsemi.android.nrftoolbox.proximity;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -33,50 +35,67 @@ import android.media.Ringtone;
 import android.media.RingtoneManager;
 import android.net.Uri;
 import android.support.v4.app.NotificationManagerCompat;
+import android.support.v4.content.ContextCompat;
 import android.support.v7.app.NotificationCompat;
+import android.text.TextUtils;
 
-import no.nordicsemi.android.log.Logger;
+import java.util.LinkedList;
+import java.util.List;
+
+import no.nordicsemi.android.log.LogContract;
 import no.nordicsemi.android.nrftoolbox.FeaturesActivity;
 import no.nordicsemi.android.nrftoolbox.R;
 import no.nordicsemi.android.nrftoolbox.profile.BleManager;
-import no.nordicsemi.android.nrftoolbox.profile.BleProfileService;
+import no.nordicsemi.android.nrftoolbox.profile.multiconnect.BleMulticonnectProfileService;
 
-public class ProximityService extends BleProfileService implements ProximityManagerCallbacks {
+public class ProximityService extends BleMulticonnectProfileService implements ProximityManagerCallbacks, ProximityServerManagerCallbacks {
 	@SuppressWarnings("unused")
 	private static final String TAG = "ProximityService";
 
 	private final static String ACTION_DISCONNECT = "no.nordicsemi.android.nrftoolbox.proximity.ACTION_DISCONNECT";
-	private final static String ACTION_FIND_ME = "no.nordicsemi.android.nrftoolbox.proximity.ACTION_FIND_ME";
-	private final static String ACTION_SILENT_ME = "no.nordicsemi.android.nrftoolbox.proximity.ACTION_SILENT_ME";
+	private final static String ACTION_FIND = "no.nordicsemi.android.nrftoolbox.proximity.ACTION_FIND";
+	private final static String ACTION_SILENT = "no.nordicsemi.android.nrftoolbox.proximity.ACTION_SILENT";
+	private final static String EXTRA_DEVICE = "no.nordicsemi.android.nrftoolbox.proximity.EXTRA_DEVICE";
 
-	private ProximityManager mProximityManager;
-	private Ringtone mRingtoneNotification;
-	private Ringtone mRingtoneAlarm;
-	private boolean isImmediateAlertOn = false;
-
-	private final static int NOTIFICATION_ID = 100;
+	private final static String PROXIMITY_GROUP_ID = "proximity_connected_tags";
+	private final static int NOTIFICATION_ID = 1000;
 	private final static int OPEN_ACTIVITY_REQ = 0;
 	private final static int DISCONNECT_REQ = 1;
-	private final static int FIND_ME_REQ = 2;
-	private final static int SILENT_ME_REQ = 3;
+	private final static int FIND_REQ = 2;
+	private final static int SILENT_REQ = 3;
 
-	private final LocalBinder mBinder = new ProximityBinder();
+	private final ProximityBinder mBinder = new ProximityBinder();
+	private ProximityServerManager mServerManager;
+	private Ringtone mRingtoneAlarm;
+	/**
+	 * When a device starts an alarm on the phone it is added to this list.
+	 * Alarm is disabled when this list is empty.
+	 */
+	private List<BluetoothDevice> mDevicesWithAlarm;
 
 	/**
 	 * This local binder is an interface for the bonded activity to operate with the proximity sensor
 	 */
 	public class ProximityBinder extends LocalBinder {
-		public boolean toggleImmediateAlert() {
-			if (isImmediateAlertOn) {
-				stopImmediateAlert();
-			} else {
-				startImmediateAlert();
-			}
-			return isImmediateAlertOn; // this value is changed by methods above
+		/**
+		 * Toggles the Immediate Alert on given remote device.
+		 * @param device the connected device
+		 * @return true if alarm has been enabled, false if disabled
+		 */
+		public boolean toggleImmediateAlert(final BluetoothDevice device) {
+			final ProximityManager manager = (ProximityManager) getBleManager(device);
+			return manager.toggleImmediateAlert();
 		}
 
-		public boolean isImmediateAlertOn() {
-			return isImmediateAlertOn;
+		/**
+		 * Returns the current alarm state on given device. This value is not read from the device, it's just the last value written to it
+		 * (initially false).
+		 * @param device the connected device
+		 * @return true if alarm has been enabled, false if disabled
+		 */
+		public boolean isImmediateAlertOn(final BluetoothDevice device) {
+			final ProximityManager manager = (ProximityManager) getBleManager(device);
+			return manager.isAlertEnabled();
 		}
 	}
 
@@ -87,7 +106,7 @@ public class ProximityService extends BleProfileService implements ProximityMana
 
 	@Override
 	protected BleManager<ProximityManagerCallbacks> initializeManager() {
-		return mProximityManager = new ProximityManager(this);
+		return new ProximityManager(this);
 	}
 
 	/**
@@ -96,147 +115,206 @@ public class ProximityService extends BleProfileService implements ProximityMana
 	private final BroadcastReceiver mDisconnectActionBroadcastReceiver = new BroadcastReceiver() {
 		@Override
 		public void onReceive(final Context context, final Intent intent) {
-			Logger.i(getLogSession(), "[Notification] Disconnect action pressed");
-			if (isConnected())
-				getBinder().disconnect();
-			else
-				stopSelf();
+			final BluetoothDevice device = intent.getParcelableExtra(EXTRA_DEVICE);
+			mBinder.log(device, LogContract.Log.Level.INFO, "[Notification] DISCONNECT action pressed");
+			mBinder.disconnect(device);
 		}
 	};
 
 	/**
-	 * This broadcast receiver listens for {@link #ACTION_FIND_ME} that may be fired by pressing Find me action button on the notification.
+	 * This broadcast receiver listens for {@link #ACTION_FIND} or {@link #ACTION_SILENT} that may be fired by pressing Find me action button on the notification.
 	 */
-	private final BroadcastReceiver mFindMeActionBroadcastReceiver = new BroadcastReceiver() {
+	private final BroadcastReceiver mToggleAlarmActionBroadcastReceiver = new BroadcastReceiver() {
 		@Override
 		public void onReceive(final Context context, final Intent intent) {
-			Logger.i(getLogSession(), "[Notification] Find Me action pressed");
-			startImmediateAlert();
-		}
-	};
-
-	/**
-	 * This broadcast receiver listens for {@link #ACTION_SILENT_ME} that may be fired by pressing Silent Me action button on the notification.
-	 */
-	private final BroadcastReceiver mSilentMeActionBroadcastReceiver = new BroadcastReceiver() {
-		@Override
-		public void onReceive(final Context context, final Intent intent) {
-			Logger.i(getLogSession(), "[Notification] Silent Me action pressed");
-			stopImmediateAlert();
+			final BluetoothDevice device = intent.getParcelableExtra(EXTRA_DEVICE);
+			switch (intent.getAction()) {
+				case ACTION_FIND:
+					mBinder.log(device, LogContract.Log.Level.INFO, "[Notification] FIND action pressed");
+					break;
+				case ACTION_SILENT:
+					mBinder.log(device, LogContract.Log.Level.INFO, "[Notification] SILENT action pressed");
+					break;
+			}
+			mBinder.toggleImmediateAlert(device);
+			createNotificationForConnectedDevice(device);
 		}
 	};
 
 	@Override
-	public void onCreate() {
-		super.onCreate();
+	protected void onServiceCreated() {
+		mServerManager = new ProximityServerManager(this);
+		mServerManager.setLogger(mBinder);
 
 		initializeAlarm();
 
 		registerReceiver(mDisconnectActionBroadcastReceiver, new IntentFilter(ACTION_DISCONNECT));
-		registerReceiver(mFindMeActionBroadcastReceiver, new IntentFilter(ACTION_FIND_ME));
-		registerReceiver(mSilentMeActionBroadcastReceiver, new IntentFilter(ACTION_SILENT_ME));
+		final IntentFilter filter = new IntentFilter();
+		filter.addAction(ACTION_FIND);
+		filter.addAction(ACTION_SILENT);
+		registerReceiver(mToggleAlarmActionBroadcastReceiver, filter);
 	}
 
 	@Override
-	public void onDestroy() {
-		cancelNotification();
-		unregisterReceiver(mDisconnectActionBroadcastReceiver);
-		unregisterReceiver(mFindMeActionBroadcastReceiver);
-		unregisterReceiver(mSilentMeActionBroadcastReceiver);
+	public void onServiceStopped() {
+		cancelNotifications();
 
-		super.onDestroy();
+		// Close the GATT server. If it hasn't been opened this method does nothing
+		mServerManager.closeGattServer();
+
+		unregisterReceiver(mDisconnectActionBroadcastReceiver);
+		unregisterReceiver(mToggleAlarmActionBroadcastReceiver);
+
+		super.onServiceStopped();
+	}
+
+	@Override
+	protected void onBluetoothEnabled() {
+		// Start the GATT Server only if Bluetooth is enabled
+		mServerManager.openGattServer(this, new ProximityServerManager.OnServerOpenCallback() {
+			@Override
+			public void onGattServerOpen() {
+				// We are now ready to reconnect devices
+				ProximityService.super.onBluetoothEnabled();
+			}
+
+			@Override
+			public void onGattServerFailed(final int error) {
+				mServerManager.closeGattServer();
+				showToast(getString(R.string.proximity_server_error, error));
+			}
+		});
+	}
+
+	@Override
+	protected void onBluetoothDisabled() {
+		super.onBluetoothDisabled();
+		// Close the GATT server
+		mServerManager.closeGattServer();
 	}
 
 	@Override
 	protected void onRebind() {
-		// when the activity rebinds to the service, remove the notification
-		cancelNotification();
+		// When the activity rebinds to the service, remove the notification
+		cancelNotifications();
 	}
 
 	@Override
 	public void onUnbind() {
-		// when the activity closes we need to show the notification that user is connected to the sensor
-		if (isConnected())
-			createNotification(R.string.proximity_notification_connected_message, 0);
-		else
-			createNotification(R.string.proximity_notification_linkloss_alert, 0);
+		createBackgroundNotification();
 	}
 
 	@Override
-	protected void onServiceStarted() {
-		// logger is now available. Assign it to the manager
-		mProximityManager.setLogger(getLogSession());
-	}
-
-	@Override
-	public void onDeviceDisconnecting() {
-		stopAlarm();
-	}
-
-	@Override
-	public void onDeviceDisconnected() {
-		super.onDeviceDisconnected();
-		isImmediateAlertOn = false;
-	}
-
-	@Override
-	public void onLinklossOccur() {
-		super.onLinklossOccur();
-		isImmediateAlertOn = false;
+	public void onDeviceConnected(final BluetoothDevice device) {
+		super.onDeviceConnected(device);
 
 		if (!mBinded) {
-			// when the activity closes we need to show the notification that user is connected to the sensor
-			playNotification();
-			createNotification(R.string.proximity_notification_linkloss_alert, Notification.DEFAULT_ALL);
+			createBackgroundNotification();
 		}
 	}
 
 	@Override
-	public void onAlarmTriggered() {
-		playAlarm();
+	public void onServicesDiscovered(final BluetoothDevice device, final boolean optionalServicesFound) {
+		super.onServicesDiscovered(device, optionalServicesFound);
+		mServerManager.openConnection(device);
 	}
 
 	@Override
-	public void onAlarmStopped() {
-		stopAlarm();
+	public void onLinklossOccur(final BluetoothDevice device) {
+		mServerManager.cancelConnection(device);
+		stopAlarm(device);
+		super.onLinklossOccur(device);
+
+		if (!mBinded) {
+			createBackgroundNotification();
+			if (BluetoothAdapter.getDefaultAdapter().isEnabled())
+				createLinklossNotification(device);
+			else
+				cancelNotification(device);
+		}
 	}
 
-	/**
-	 * Creates the notification
-	 * 
-	 * @param messageResId
-	 *            message resource id. The message must have one String parameter,<br />
-	 *            f.e. <code>&lt;string name="name"&gt;%s is connected&lt;/string&gt;</code>
-	 * @param defaults
-	 *            signals that will be used to notify the user
-	 */
-	private void createNotification(final int messageResId, final int defaults) {
-		final Intent parentIntent = new Intent(this, FeaturesActivity.class);
-		parentIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-		final Intent targetIntent = new Intent(this, ProximityActivity.class);
+	@Override
+	public void onDeviceDisconnected(final BluetoothDevice device) {
+		mServerManager.cancelConnection(device);
+		stopAlarm(device);
+		super.onDeviceDisconnected(device);
 
-		final Intent disconnect = new Intent(ACTION_DISCONNECT);
-		final PendingIntent disconnectAction = PendingIntent.getBroadcast(this, DISCONNECT_REQ, disconnect, PendingIntent.FLAG_UPDATE_CURRENT);
+		if (!mBinded) {
+			cancelNotification(device);
+			createBackgroundNotification();
+		}
+	}
 
-		PendingIntent secondAction;
-		if (isImmediateAlertOn) {
-			final Intent intent = new Intent(ACTION_SILENT_ME);
-			secondAction = PendingIntent.getBroadcast(this, SILENT_ME_REQ, intent, PendingIntent.FLAG_UPDATE_CURRENT);
+	@Override
+	public void onAlarmTriggered(final BluetoothDevice device) {
+		playAlarm(device);
+	}
+
+	@Override
+	public void onAlarmStopped(final BluetoothDevice device) {
+		stopAlarm(device);
+	}
+
+	private void createBackgroundNotification() {
+		final List<BluetoothDevice> connectedDevices = getConnectedDevices();
+		for (final BluetoothDevice device : connectedDevices) {
+			createNotificationForConnectedDevice(device);
+		}
+		createSummaryNotification();
+	}
+
+	private void createSummaryNotification() {
+		final NotificationCompat.Builder builder = getNotificationBuilder();
+		builder.setColor(ContextCompat.getColor(this, R.color.actionBarColorDark));
+		builder.setShowWhen(false).setDefaults(0).setOngoing(true); // an ongoing notification will not be shown on Android Wear
+		builder.setGroup(PROXIMITY_GROUP_ID).setGroupSummary(true);
+		builder.setContentTitle(getString(R.string.app_name));
+
+		final List<BluetoothDevice> managedDevices = getManagedDevices();
+		final List<BluetoothDevice> connectedDevices = getConnectedDevices();
+		if (connectedDevices.isEmpty()) {
+			// No connected devices
+			final int numberOfManagedDevices = managedDevices.size();
+			if (numberOfManagedDevices == 1) {
+				final String name = getDeviceName(managedDevices.get(0));
+				// We don't use plurals here, as we only have the default language and 'one' is not in every language (versions differ in %d or %s)
+				// and throw an exception in e.g. in Chinese
+				builder.setContentText(getString(R.string.proximity_notification_text_nothing_connected_one_disconnected, name));
+			} else {
+				builder.setContentText(getString(R.string.proximity_notification_text_nothing_connected_number_disconnected, numberOfManagedDevices));
+			}
 		} else {
-			final Intent intent = new Intent(ACTION_FIND_ME);
-			secondAction = PendingIntent.getBroadcast(this, FIND_ME_REQ, intent, PendingIntent.FLAG_UPDATE_CURRENT);
-		}
+			// There are some proximity tags connected
+			final StringBuilder text = new StringBuilder();
 
-		// both activities above have launchMode="singleTask" in the AndroidManifest.xml file, so if the task is already running, it will be resumed
-		final PendingIntent pendingIntent = PendingIntent.getActivities(this, OPEN_ACTIVITY_REQ, new Intent[] { parentIntent, targetIntent }, PendingIntent.FLAG_UPDATE_CURRENT);
-		final NotificationCompat.Builder builder = new NotificationCompat.Builder(this);
-		builder.setContentIntent(pendingIntent);
-		builder.setContentTitle(getString(R.string.app_name)).setContentText(getString(messageResId, getDeviceName()));
-		builder.setSmallIcon(R.drawable.ic_stat_notify_proximity);
-		builder.setShowWhen(defaults != 0).setDefaults(defaults).setAutoCancel(true).setOngoing(defaults == 0); // an ongoing notification would not be shown on Android Wear
-		builder.addAction(new NotificationCompat.Action(R.drawable.ic_action_bluetooth, getString(R.string.proximity_notification_action_disconnect), disconnectAction));
-		if (isConnected())
-			builder.addAction(new NotificationCompat.Action(R.drawable.ic_stat_notify_proximity, getString(isImmediateAlertOn ? R.string.proximity_action_silentme : R.string.proximity_action_findme), secondAction));
+			final int numberOfConnectedDevices = connectedDevices.size();
+			if (numberOfConnectedDevices == 1) {
+				final String name = getDeviceName(connectedDevices.get(0));
+				text.append(getString(R.string.proximity_notification_summary_text_name, name));
+			} else {
+				text.append(getString(R.string.proximity_notification_summary_text_number, numberOfConnectedDevices));
+			}
+
+			// If there are some disconnected devices, also print them
+			final int numberOfDisconnectedDevices = managedDevices.size() - numberOfConnectedDevices;
+			if (numberOfDisconnectedDevices == 1) {
+				text.append(", ");
+				// Find the single disconnected device to get its name
+				for (final BluetoothDevice device : managedDevices) {
+					if (!isConnected(device)) {
+						final String name = getDeviceName(device);
+						text.append(getString(R.string.proximity_notification_text_nothing_connected_one_disconnected, name));
+						break;
+					}
+				}
+			} else if (numberOfDisconnectedDevices > 1) {
+				text.append(", ");
+				// If there are more, just write number of them
+				text.append(getString(R.string.proximity_notification_text_nothing_connected_number_disconnected, numberOfDisconnectedDevices));
+			}
+			builder.setContentText(text);
+		}
 
 		final Notification notification = builder.build();
 		final NotificationManagerCompat nm = NotificationManagerCompat.from(this);
@@ -244,50 +322,128 @@ public class ProximityService extends BleProfileService implements ProximityMana
 	}
 
 	/**
+	 * Creates the notification for given connected device.
+	 * Adds 3 action buttons: DISCONNECT, FIND and SILENT which perform given action on the device.
+	 */
+	private void createNotificationForConnectedDevice(final BluetoothDevice device) {
+		final NotificationCompat.Builder builder = getNotificationBuilder();
+		builder.setColor(ContextCompat.getColor(this, R.color.actionBarColorDark));
+		builder.setGroup(PROXIMITY_GROUP_ID).setDefaults(0).setOngoing(true); // an ongoing notification will not be shown on Android Wear
+		builder.setContentTitle(getString(R.string.proximity_notification_text, getDeviceName(device)));
+
+		// Add DISCONNECT action
+		final Intent disconnect = new Intent(ACTION_DISCONNECT);
+		disconnect.putExtra(EXTRA_DEVICE, device);
+		final PendingIntent disconnectAction = PendingIntent.getBroadcast(this, DISCONNECT_REQ + device.hashCode(), disconnect, PendingIntent.FLAG_UPDATE_CURRENT);
+		builder.addAction(new NotificationCompat.Action(R.drawable.ic_action_bluetooth, getString(R.string.proximity_action_disconnect), disconnectAction));
+		builder.setSortKey(getDeviceName(device) + device.getAddress()); // This will keep the same order of notification even after an action was clicked on one of them
+
+		// Add FIND or SILENT action
+		final ProximityManager manager = (ProximityManager) getBleManager(device);
+		if (manager.isAlertEnabled()) {
+			final Intent silentAllIntent = new Intent(ACTION_SILENT);
+			silentAllIntent.putExtra(EXTRA_DEVICE, device);
+			final PendingIntent silentAction = PendingIntent.getBroadcast(this, SILENT_REQ + device.hashCode(), silentAllIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+			builder.addAction(new NotificationCompat.Action(R.drawable.ic_stat_notify_proximity_silent, getString(R.string.proximity_action_silent), silentAction));
+		} else {
+			final Intent findAllIntent = new Intent(ACTION_FIND);
+			findAllIntent.putExtra(EXTRA_DEVICE, device);
+			final PendingIntent findAction = PendingIntent.getBroadcast(this, FIND_REQ + device.hashCode(), findAllIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+			builder.addAction(new NotificationCompat.Action(R.drawable.ic_stat_notify_proximity_find, getString(R.string.proximity_action_find), findAction));
+		}
+
+		final Notification notification = builder.build();
+		final NotificationManagerCompat nm = NotificationManagerCompat.from(this);
+		nm.notify(device.getAddress(), NOTIFICATION_ID, notification);
+	}
+
+	/**
+	 * Creates a notification showing information about a device that got disconnected.
+	 */
+	private void createLinklossNotification(final BluetoothDevice device) {
+		final NotificationCompat.Builder builder = getNotificationBuilder();
+		builder.setColor(ContextCompat.getColor(this, R.color.orange));
+
+		final Uri notificationUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+		builder.setSound(notificationUri, AudioManager.STREAM_ALARM); // make sure the sound is played even in DND mode
+		builder.setPriority(NotificationCompat.PRIORITY_HIGH);
+		builder.setCategory(NotificationCompat.CATEGORY_ALARM);
+		builder.setShowWhen(true).setOngoing(false); // an ongoing notification would not be shown on Android Wear
+		// This notification is to be shown not in a group
+
+		final String name = getDeviceName(device);
+		builder.setContentTitle(getString(R.string.proximity_notification_linkloss_alert, name));
+		builder.setTicker(getString(R.string.proximity_notification_linkloss_alert, name));
+
+		final Notification notification = builder.build();
+		final NotificationManagerCompat nm = NotificationManagerCompat.from(this);
+		nm.notify(device.getAddress(), NOTIFICATION_ID, notification);
+	}
+
+	private NotificationCompat.Builder getNotificationBuilder() {
+		final Intent parentIntent = new Intent(this, FeaturesActivity.class);
+		parentIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+		final Intent targetIntent = new Intent(this, ProximityActivity.class);
+
+		// Both activities above have launchMode="singleTask" in the AndroidManifest.xml file, so if the task is already running, it will be resumed
+		final PendingIntent pendingIntent = PendingIntent.getActivities(this, OPEN_ACTIVITY_REQ, new Intent[] { parentIntent, targetIntent }, PendingIntent.FLAG_UPDATE_CURRENT);
+
+		final NotificationCompat.Builder builder = new NotificationCompat.Builder(this);
+		builder.setContentIntent(pendingIntent).setAutoCancel(false);
+		builder.setSmallIcon(R.drawable.ic_stat_notify_proximity);
+		return builder;
+	}
+
+	/**
 	 * Cancels the existing notification. If there is no active notification this method does nothing
 	 */
-	private void cancelNotification() {
+	private void cancelNotifications() {
 		final NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
 		nm.cancel(NOTIFICATION_ID);
+
+		final List<BluetoothDevice> managedDevices = getManagedDevices();
+		for (final BluetoothDevice device : managedDevices) {
+			nm.cancel(device.getAddress(), NOTIFICATION_ID);
+		}
+	}
+
+	/**
+	 * Cancels the existing notification for given device. If there is no active notification this method does nothing
+	 */
+	private void cancelNotification(final BluetoothDevice device) {
+		final NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+		nm.cancel(device.getAddress(), NOTIFICATION_ID);
 	}
 
 	private void initializeAlarm() {
+		mDevicesWithAlarm = new LinkedList<>();
 		final Uri alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
 		mRingtoneAlarm = RingtoneManager.getRingtone(this, alarmUri);
-
-		final Uri notification = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
-		mRingtoneNotification = RingtoneManager.getRingtone(this, notification);
 	}
 
-	private void playNotification() {
-		mRingtoneNotification.play();
-	}
+	private void playAlarm(final BluetoothDevice device) {
+		final boolean alarmPlaying = !mDevicesWithAlarm.isEmpty();
+		if (!mDevicesWithAlarm.contains(device))
+			mDevicesWithAlarm.add(device);
 
-	private void playAlarm() {
-		final AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-		am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
-		mRingtoneAlarm.play();
-	}
-
-	private void stopAlarm() {
-		mRingtoneAlarm.stop();
-	}
-
-	private void startImmediateAlert() {
-		isImmediateAlertOn = true;
-		mProximityManager.writeImmediateAlertOn();
-
-		if (!mBinded) {
-			createNotification(R.string.proximity_notification_connected_message, 0);
+		if (!alarmPlaying) {
+			final AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+			am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+			mRingtoneAlarm.play();
 		}
 	}
 
-	private void stopImmediateAlert() {
-		isImmediateAlertOn = false;
-		mProximityManager.writeImmediateAlertOff();
-
-		if (!mBinded) {
-			createNotification(R.string.proximity_notification_connected_message, 0);
+	private void stopAlarm(final BluetoothDevice device) {
+		mDevicesWithAlarm.remove(device);
+		if (mDevicesWithAlarm.isEmpty()) {
+			mRingtoneAlarm.stop();
 		}
+	}
+
+	private String getDeviceName(final BluetoothDevice device) {
+		String name = device.getName();
+		if (TextUtils.isEmpty(name))
+			name = getString(R.string.proximity_default_device_name);
+		return name;
 	}
 }

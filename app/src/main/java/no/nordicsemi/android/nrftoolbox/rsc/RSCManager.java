@@ -27,13 +27,13 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
 
+import java.util.Deque;
 import java.util.LinkedList;
-import java.util.Queue;
 import java.util.UUID;
 
 import no.nordicsemi.android.log.Logger;
-import no.nordicsemi.android.nrftoolbox.profile.BleManager;
 import no.nordicsemi.android.nrftoolbox.parser.RSCMeasurementParser;
+import no.nordicsemi.android.nrftoolbox.profile.BleManager;
 
 public class RSCManager extends BleManager<RSCManagerCallbacks> {
 	private static final byte INSTANTANEOUS_STRIDE_LENGTH_PRESENT = 0x01; // 1 bit
@@ -62,9 +62,9 @@ public class RSCManager extends BleManager<RSCManagerCallbacks> {
 	private final BleManagerGattCallback mGattCallback = new BleManagerGattCallback() {
 
 		@Override
-		protected Queue<Request> initGatt(final BluetoothGatt gatt) {
+		protected Deque<Request> initGatt(final BluetoothGatt gatt) {
 			final LinkedList<Request> requests = new LinkedList<>();
-			requests.push(Request.newEnableNotificationsRequest(mRSCMeasurementCharacteristic));
+			requests.add(Request.newEnableNotificationsRequest(mRSCMeasurementCharacteristic));
 			return requests;
 		}
 
@@ -84,8 +84,7 @@ public class RSCManager extends BleManager<RSCManagerCallbacks> {
 
 		@Override
 		public void onCharacteristicNotified(final BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
-			if (mLogSession != null)
-				Logger.a(mLogSession, RSCMeasurementParser.parse(characteristic));
+			Logger.a(mLogSession, "\"" + RSCMeasurementParser.parse(characteristic) + "\" received");
 
 			// Decode the new data
 			int offset = 0;
@@ -115,8 +114,8 @@ public class RSCManager extends BleManager<RSCManagerCallbacks> {
 			}
 
 			// Notify listener about the new measurement
-			mCallbacks.onMeasurementReceived(instantaneousSpeed, instantaneousCadence, totalDistance, instantaneousStrideLength, running ? RSCManagerCallbacks.ACTIVITY_RUNNING
-					: RSCManagerCallbacks.ACTIVITY_WALKING);
+			mCallbacks.onMeasurementReceived(gatt.getDevice(), instantaneousSpeed, instantaneousCadence, totalDistance, instantaneousStrideLength,
+					running ? RSCManagerCallbacks.ACTIVITY_RUNNING : RSCManagerCallbacks.ACTIVITY_WALKING);
 		}
 	};
 }

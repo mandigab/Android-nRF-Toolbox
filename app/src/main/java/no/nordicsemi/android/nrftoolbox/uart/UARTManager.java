@@ -29,10 +29,11 @@ import android.content.Context;
 import android.text.TextUtils;
 
 import java.io.UnsupportedEncodingException;
+import java.util.Deque;
 import java.util.LinkedList;
-import java.util.Queue;
 import java.util.UUID;
 
+import no.nordicsemi.android.log.Logger;
 import no.nordicsemi.android.nrftoolbox.profile.BleManager;
 
 public class UARTManager extends BleManager<UARTManagerCallbacks> {
@@ -64,9 +65,9 @@ public class UARTManager extends BleManager<UARTManagerCallbacks> {
 	private final BleManagerGattCallback mGattCallback = new BleManagerGattCallback() {
 
 		@Override
-		protected Queue<Request> initGatt(final BluetoothGatt gatt) {
+		protected Deque<Request> initGatt(final BluetoothGatt gatt) {
 			final LinkedList<Request> requests = new LinkedList<>();
-			requests.push(Request.newEnableNotificationsRequest(mTXCharacteristic));
+			requests.add(Request.newEnableNotificationsRequest(mTXCharacteristic));
 			return requests;
 		}
 
@@ -106,25 +107,25 @@ public class UARTManager extends BleManager<UARTManagerCallbacks> {
 			final byte[] buffer = mOutgoingBuffer;
 			if (mBufferOffset == buffer.length) {
 				try {
-					mCallbacks.onDataSent(new String(buffer, "UTF-8"));
+					final String data = new String(buffer, "UTF-8");
+					Logger.a(mLogSession, "\"" + data + "\" sent");
+					mCallbacks.onDataSent(gatt.getDevice(), data);
 				} catch (final UnsupportedEncodingException e) {
 					// do nothing
 				}
 				mOutgoingBuffer = null;
 			} else { // Otherwise...
 				final int length = Math.min(buffer.length - mBufferOffset, MAX_PACKET_SIZE);
-				final byte[] data = new byte[length]; // We send at most 20 bytes
-				System.arraycopy(buffer, mBufferOffset, data, 0, length);
+				enqueue(Request.newWriteRequest(mRXCharacteristic, buffer, mBufferOffset, length));
 				mBufferOffset += length;
-				mRXCharacteristic.setValue(data);
-				writeCharacteristic(mRXCharacteristic);
 			}
 		}
 
 		@Override
 		public void onCharacteristicNotified(final BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
 			final String data = characteristic.getStringValue(0);
-			mCallbacks.onDataReceived(data);
+			Logger.a(mLogSession, "\"" + data + "\" received");
+			mCallbacks.onDataReceived(gatt.getDevice(), data);
 		}
 	};
 
@@ -154,15 +155,12 @@ public class UARTManager extends BleManager<UARTManagerCallbacks> {
 
 			if (!writeRequest) { // no WRITE REQUEST property
 				final int length = Math.min(buffer.length, MAX_PACKET_SIZE);
-				final byte[] data = new byte[length]; // We send at most 20 bytes
-				System.arraycopy(buffer, 0, data, 0, length);
 				mBufferOffset += length;
-				mRXCharacteristic.setValue(data);
-			} else { // there is WRITE REQUEST property
-				mRXCharacteristic.setValue(buffer);
+				enqueue(Request.newWriteRequest(mRXCharacteristic, buffer, 0, length));
+			} else { // there is WRITE REQUEST property, let's try Long Write
 				mBufferOffset = buffer.length;
+				enqueue(Request.newWriteRequest(mRXCharacteristic, buffer, 0, buffer.length));
 			}
-			writeCharacteristic(mRXCharacteristic);
 		}
 	}
 }

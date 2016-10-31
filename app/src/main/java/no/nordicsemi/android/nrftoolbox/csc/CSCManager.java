@@ -27,13 +27,13 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
 
+import java.util.Deque;
 import java.util.LinkedList;
-import java.util.Queue;
 import java.util.UUID;
 
 import no.nordicsemi.android.log.Logger;
-import no.nordicsemi.android.nrftoolbox.profile.BleManager;
 import no.nordicsemi.android.nrftoolbox.parser.CSCMeasurementParser;
+import no.nordicsemi.android.nrftoolbox.profile.BleManager;
 
 public class CSCManager extends BleManager<CSCManagerCallbacks> {
 	/** Cycling Speed and Cadence service UUID */
@@ -61,9 +61,9 @@ public class CSCManager extends BleManager<CSCManagerCallbacks> {
 	private final BleManagerGattCallback mGattCallback = new BleManagerGattCallback() {
 
 		@Override
-		protected Queue<Request> initGatt(final BluetoothGatt gatt) {
+		protected Deque<Request> initGatt(final BluetoothGatt gatt) {
 			final LinkedList<Request> requests = new LinkedList<>();
-			requests.push(Request.newEnableNotificationsRequest(mCSCMeasurementCharacteristic));
+			requests.add(Request.newEnableNotificationsRequest(mCSCMeasurementCharacteristic));
 			return requests;
 		}
 
@@ -83,8 +83,7 @@ public class CSCManager extends BleManager<CSCManagerCallbacks> {
 
 		@Override
 		public void onCharacteristicNotified(final BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
-			if (mLogSession != null)
-				Logger.a(mLogSession, CSCMeasurementParser.parse(characteristic));
+			Logger.a(mLogSession, "\"" + CSCMeasurementParser.parse(characteristic) + "\" received");
 
 			// Decode the new data
 			int offset = 0;
@@ -102,7 +101,7 @@ public class CSCManager extends BleManager<CSCManagerCallbacks> {
 				offset += 2;
 
 				// Notify listener about the new measurement
-				mCallbacks.onWheelMeasurementReceived(wheelRevolutions, lastWheelEventTime);
+				mCallbacks.onWheelMeasurementReceived(gatt.getDevice(), wheelRevolutions, lastWheelEventTime);
 			}
 
 			if (crankRevPreset) {
@@ -113,7 +112,7 @@ public class CSCManager extends BleManager<CSCManagerCallbacks> {
 				// offset += 2;
 
 				// Notify listener about the new measurement
-				mCallbacks.onCrankMeasurementReceived(crankRevolutions, lastCrankEventTime);
+				mCallbacks.onCrankMeasurementReceived(gatt.getDevice(), crankRevolutions, lastCrankEventTime);
 			}
 		}
 	};

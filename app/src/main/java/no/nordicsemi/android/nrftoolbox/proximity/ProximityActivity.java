@@ -21,30 +21,28 @@
  */
 package no.nordicsemi.android.nrftoolbox.proximity;
 
-import android.content.SharedPreferences;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.os.Bundle;
-import android.preference.PreferenceManager;
-import android.view.View;
-import android.widget.Button;
-import android.widget.CheckBox;
-import android.widget.CompoundButton;
-import android.widget.ImageView;
+import android.support.v7.widget.LinearLayoutManager;
+import android.support.v7.widget.RecyclerView;
 
 import java.util.UUID;
 
 import no.nordicsemi.android.nrftoolbox.R;
-import no.nordicsemi.android.nrftoolbox.profile.BleProfileService;
-import no.nordicsemi.android.nrftoolbox.profile.BleProfileServiceReadyActivity;
-import no.nordicsemi.android.nrftoolbox.utility.DebugLogger;
+import no.nordicsemi.android.nrftoolbox.profile.multiconnect.BleMulticonnectProfileService;
+import no.nordicsemi.android.nrftoolbox.profile.multiconnect.BleMulticonnectProfileServiceReadyActivity;
+import no.nordicsemi.android.nrftoolbox.widget.DividerItemDecoration;
 
-public class ProximityActivity extends BleProfileServiceReadyActivity<ProximityService.ProximityBinder> {
+public class ProximityActivity extends BleMulticonnectProfileServiceReadyActivity<ProximityService.ProximityBinder> {
 	private static final String TAG = "ProximityActivity";
 
-	public static final String PREFS_GATT_SERVER_ENABLED = "prefs_gatt_server_enabled";
+	// This is not used any more. Server is created always after the service is started or
+	// after Bluetooth adapter is enabled.
+	// public static final String PREFS_GATT_SERVER_ENABLED = "prefs_gatt_server_enabled";
 
-	private Button mFindMeButton;
-	private ImageView mLockImage;
-	private CheckBox mGattServerSwitch;
+	private RecyclerView mDevicesView;
+	private DeviceAdapter mAdapter;
 
 	@Override
 	protected void onCreateView(final Bundle savedInstanceState) {
@@ -53,18 +51,9 @@ public class ProximityActivity extends BleProfileServiceReadyActivity<ProximityS
 	}
 
 	private void setGUI() {
-		mFindMeButton = (Button) findViewById(R.id.action_findme);
-		mLockImage = (ImageView) findViewById(R.id.imageLock);
-		mGattServerSwitch = (CheckBox) findViewById(R.id.option);
-
-		final SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(ProximityActivity.this);
-		mGattServerSwitch.setChecked(preferences.getBoolean(PREFS_GATT_SERVER_ENABLED, true));
-		mGattServerSwitch.setOnCheckedChangeListener(new CheckBox.OnCheckedChangeListener() {
-			@Override
-			public void onCheckedChanged(final CompoundButton buttonView, final boolean isChecked) {
-				preferences.edit().putBoolean(PREFS_GATT_SERVER_ENABLED, isChecked).apply();
-			}
-		});
+		final RecyclerView recyclerView = mDevicesView = (RecyclerView) findViewById(android.R.id.list);
+		recyclerView.setLayoutManager(new LinearLayoutManager(this));
+		recyclerView.addItemDecoration(new DividerItemDecoration(this, DividerItemDecoration.VERTICAL_LIST));
 	}
 
 	@Override
@@ -74,24 +63,16 @@ public class ProximityActivity extends BleProfileServiceReadyActivity<ProximityS
 
 	@Override
 	protected void onServiceBinded(final ProximityService.ProximityBinder binder) {
-		mGattServerSwitch.setEnabled(false);
-
-		if (binder.isConnected()) {
-			showOpenLock();
-
-			if (binder.isImmediateAlertOn()) {
-				showSilentMeOnButton();
-			}
-		}
+		mDevicesView.setAdapter(mAdapter = new DeviceAdapter(binder));
 	}
 
 	@Override
 	protected void onServiceUnbinded() {
-		// you may release the binder instance here
+		mDevicesView.setAdapter(mAdapter = null);
 	}
 
 	@Override
-	protected Class<? extends BleProfileService> getServiceClass() {
+	protected Class<? extends BleMulticonnectProfileService> getServiceClass() {
 		return ProximityService.class;
 	}
 
@@ -101,101 +82,61 @@ public class ProximityActivity extends BleProfileServiceReadyActivity<ProximityS
 	}
 
 	@Override
-	protected int getDefaultDeviceName() {
-		return R.string.proximity_default_name;
-	}
-
-	@Override
 	protected UUID getFilterUUID() {
 		return ProximityManager.LINKLOSS_SERVICE_UUID;
 	}
 
-	/**
-	 * Callback of FindMe button on ProximityActivity
-	 */
-	public void onFindMeClicked(final View view) {
-		if (isBLEEnabled()) {
-			if (!isDeviceConnected()) {
-				// do nothing
-			} else if (getService().toggleImmediateAlert()) {
-				showSilentMeOnButton();
-			} else {
-				showFindMeOnButton();
-			}
-		} else {
-			showBLEDialog();
-		}
+	@Override
+	public void onDeviceConnecting(final BluetoothDevice device) {
+		if (mAdapter != null)
+			mAdapter.onDeviceAdded(device);
 	}
 
 	@Override
-	protected void setDefaultUI() {
-		mFindMeButton.setText(R.string.proximity_action_findme);
-		mLockImage.setImageResource(R.drawable.proximity_lock_closed);
+	public void onDeviceConnected(final BluetoothDevice device) {
+		if (mAdapter != null)
+			mAdapter.onDeviceStateChanged(device);
 	}
 
 	@Override
-	public void onServicesDiscovered(boolean optionalServicesFound) {
-		// this may notify user or update views
+	public void onDeviceReady(final BluetoothDevice device) {
+		if (mAdapter != null)
+			mAdapter.onDeviceStateChanged(device);
 	}
 
 	@Override
-	public void onDeviceReady() {
-		showOpenLock();
+	public void onDeviceDisconnecting(final BluetoothDevice device) {
+		if (mAdapter != null)
+			mAdapter.onDeviceStateChanged(device);
 	}
 
 	@Override
-	public void onDeviceDisconnected() {
-		super.onDeviceDisconnected();
-		showClosedLock();
-		mGattServerSwitch.setEnabled(true);
+	public void onDeviceDisconnected(final BluetoothDevice device) {
+		if (mAdapter != null)
+			mAdapter.onDeviceRemoved(device);
 	}
 
 	@Override
-	public void onBondingRequired() {
-		showClosedLock();
+	public void onDeviceNotSupported(final BluetoothDevice device) {
+		super.onDeviceNotSupported(device);
+		if (mAdapter != null)
+			mAdapter.onDeviceRemoved(device);
 	}
 
 	@Override
-	public void onBonded() {
-		showOpenLock();
+	public void onLinklossOccur(final BluetoothDevice device) {
+		if (mAdapter != null)
+			mAdapter.onDeviceStateChanged(device);
+
+		// The link loss may also be called when Bluetooth adapter was disabled
+		if (BluetoothAdapter.getDefaultAdapter().isEnabled())
+			showLinklossDialog(device.getName());
 	}
 
 	@Override
-	public void onLinklossOccur() {
-		super.onLinklossOccur();
-		showClosedLock();
-		resetForLinkloss();
-
-		DebugLogger.w(TAG, "Linkloss occur");
-
-		String deviceName = getDeviceName();
-		if (deviceName == null) {
-			deviceName = getString(R.string.proximity_default_name);
-		}
-
-		showLinklossDialog(deviceName);
-	}
-
-	private void resetForLinkloss() {
-		setDefaultUI();
-	}
-
-	private void showFindMeOnButton() {
-		mFindMeButton.setText(R.string.proximity_action_findme);
-	}
-
-	private void showSilentMeOnButton() {
-		mFindMeButton.setText(R.string.proximity_action_silentme);
-	}
-
-	private void showOpenLock() {
-		mFindMeButton.setEnabled(true);
-		mLockImage.setImageResource(R.drawable.proximity_lock_open);
-	}
-
-	private void showClosedLock() {
-		mFindMeButton.setEnabled(false);
-		mLockImage.setImageResource(R.drawable.proximity_lock_closed);
+	public void onBatteryValueReceived(final BluetoothDevice device, final int value) {
+		if (mAdapter != null)
+			mAdapter.onBatteryValueReceived(device); // Value will be obtained from the service
 	}
 
 	private void showLinklossDialog(final String name) {

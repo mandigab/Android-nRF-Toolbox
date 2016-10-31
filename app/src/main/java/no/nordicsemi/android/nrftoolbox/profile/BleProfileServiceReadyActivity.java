@@ -24,7 +24,6 @@ package no.nordicsemi.android.nrftoolbox.profile;
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -73,7 +72,8 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 		ScannerFragment.OnDeviceSelectedListener, BleManagerCallbacks {
 	private static final String TAG = "BleProfileServiceReadyActivity";
 
-	private static final String DEVICE_NAME = "device_name";
+	private static final String SIS_DEVICE_NAME = "device_name";
+	private static final String SIS_DEVICE = "device";
 	private static final String LOG_URI = "log_uri";
 	protected static final int REQUEST_ENABLE_BT = 2;
 
@@ -84,13 +84,18 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 	private Button mConnectButton;
 
 	private ILogSession mLogSession;
+	private BluetoothDevice mBluetoothDevice;
 	private String mDeviceName;
 
 	private final BroadcastReceiver mCommonBroadcastReceiver = new BroadcastReceiver() {
 		@Override
 		public void onReceive(final Context context, final Intent intent) {
-			final String action = intent.getAction();
+			// Check if the broadcast applies the connected device
+			if (!isBroadcastForThisDevice(intent))
+				return;
 
+			final BluetoothDevice bluetoothDevice = intent.getParcelableExtra(BleProfileService.EXTRA_DEVICE);
+			final String action = intent.getAction();
 			switch (action) {
 				case BleProfileService.BROADCAST_CONNECTION_STATE: {
 					final int state = intent.getIntExtra(BleProfileService.EXTRA_CONNECTION_STATE, BleProfileService.STATE_DISCONNECTED);
@@ -98,21 +103,26 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 					switch (state) {
 						case BleProfileService.STATE_CONNECTED: {
 							mDeviceName = intent.getStringExtra(BleProfileService.EXTRA_DEVICE_NAME);
-							onDeviceConnected();
+							onDeviceConnected(bluetoothDevice);
 							break;
 						}
 						case BleProfileService.STATE_DISCONNECTED: {
-							onDeviceDisconnected();
+							onDeviceDisconnected(bluetoothDevice);
 							mDeviceName = null;
 							break;
 						}
 						case BleProfileService.STATE_LINK_LOSS: {
-							onLinklossOccur();
+							onLinklossOccur(bluetoothDevice);
 							break;
 						}
-						case BleProfileService.STATE_CONNECTING:
-						case BleProfileService.STATE_DISCONNECTING:
-							// current implementation does nothing in this states
+						case BleProfileService.STATE_CONNECTING: {
+							onDeviceConnecting(bluetoothDevice);
+							break;
+						}
+						case BleProfileService.STATE_DISCONNECTING: {
+							onDeviceDisconnecting(bluetoothDevice);
+							break;
+						}
 						default:
 							// there should be no other actions
 							break;
@@ -124,24 +134,24 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 					final boolean secondaryService = intent.getBooleanExtra(BleProfileService.EXTRA_SERVICE_SECONDARY, false);
 
 					if (primaryService) {
-						onServicesDiscovered(secondaryService);
+						onServicesDiscovered(bluetoothDevice, secondaryService);
 					} else {
-						onDeviceNotSupported();
+						onDeviceNotSupported(bluetoothDevice);
 					}
 					break;
 				}
 				case BleProfileService.BROADCAST_DEVICE_READY: {
-					onDeviceReady();
+					onDeviceReady(bluetoothDevice);
 					break;
 				}
 				case BleProfileService.BROADCAST_BOND_STATE: {
 					final int state = intent.getIntExtra(BleProfileService.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
 					switch (state) {
 						case BluetoothDevice.BOND_BONDING:
-							onBondingRequired();
+							onBondingRequired(bluetoothDevice);
 							break;
 						case BluetoothDevice.BOND_BONDED:
-							onBonded();
+							onBonded(bluetoothDevice);
 							break;
 					}
 					break;
@@ -149,13 +159,13 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 				case BleProfileService.BROADCAST_BATTERY_LEVEL: {
 					final int value = intent.getIntExtra(BleProfileService.EXTRA_BATTERY_LEVEL, -1);
 					if (value > 0)
-						onBatteryValueReceived(value);
+						onBatteryValueReceived(bluetoothDevice, value);
 					break;
 				}
 				case BleProfileService.BROADCAST_ERROR: {
 					final String message = intent.getStringExtra(BleProfileService.EXTRA_ERROR_MESSAGE);
 					final int errorCode = intent.getIntExtra(BleProfileService.EXTRA_ERROR_CODE, 0);
-					onError(message, errorCode);
+					onError(bluetoothDevice, message, errorCode);
 					break;
 				}
 			}
@@ -167,28 +177,39 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 		@Override
 		public void onServiceConnected(final ComponentName name, final IBinder service) {
 			final E bleService = mService = (E) service;
+			mBluetoothDevice = bleService.getBluetoothDevice();
 			mLogSession = mService.getLogSession();
-			Logger.d(mLogSession, "Activity binded to the service");
+			Logger.d(mLogSession, "Activity bound to the service");
 			onServiceBinded(bleService);
 
-			// update UI
+			// Update UI
 			mDeviceName = bleService.getDeviceName();
 			mDeviceNameView.setText(mDeviceName);
 			mConnectButton.setText(R.string.action_disconnect);
 
-			// and notify user if device is connected
-			if (bleService.isConnected())
-				onDeviceConnected();
+			// And notify user if device is connected
+			if (bleService.isConnected()) {
+				onDeviceConnected(mBluetoothDevice);
+			} else {
+				// If the device is not connected it means that either it is still connecting,
+				// or the link was lost and service is trying to connect to it (autoConnect=true).
+				onDeviceConnecting(mBluetoothDevice);
+			}
 		}
 
 		@Override
 		public void onServiceDisconnected(final ComponentName name) {
+			// Note: this method is called only when the service is killed by the system,
+			// not when it stops itself or is stopped by the activity.
+			// It will be called only when there is critically low memory, in practice never
+			// when the activity is in foreground.
 			Logger.d(mLogSession, "Activity disconnected from the service");
 			mDeviceNameView.setText(getDefaultDeviceName());
 			mConnectButton.setText(R.string.action_connect);
 
 			mService = null;
 			mDeviceName = null;
+			mBluetoothDevice = null;
 			mLogSession = null;
 			onServiceUnbinded();
 		}
@@ -209,33 +230,32 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 			mLogSession = Logger.openSession(getApplicationContext(), logUri);
 		}
 
-		/*
-		 * In this example we use the ProximityManager in the service. This class communicates with the service using local broadcasts. Final activity may bind
-		 * to the Server to use its interface.
-		 */
+		// In onInitialize method a final class may register local broadcast receivers that will listen for events from the service
 		onInitialize(savedInstanceState);
+		// The onCreateView class should... create the view
 		onCreateView(savedInstanceState);
 
-        final Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_actionbar);
-        setSupportActionBar(toolbar);
+		final Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar_actionbar);
+		setSupportActionBar(toolbar);
 
+		// Common nRF Toolbox view references are obtained here
 		setUpView();
+		// View is ready to be used
 		onViewCreated(savedInstanceState);
 
 		LocalBroadcastManager.getInstance(this).registerReceiver(mCommonBroadcastReceiver, makeIntentFilter());
 	}
 
 	@Override
-	protected void onStart() {
-		super.onStart();
+	protected void onResume() {
+		super.onResume();
 
 		/*
-		 * If the service has not been started before, the following lines will not start it. However, if it's running, the Activity will be binded to it and
+		 * If the service has not been started before, the following lines will not start it. However, if it's running, the Activity will bind to it and
 		 * notified via mServiceConnection.
 		 */
 		final Intent service = new Intent(this, getServiceClass());
-		if (bindService(service, mServiceConnection, 0)) // we pass 0 as a flag so the service will not be created if not exists
-			Logger.d(mLogSession, "Binding to the service..."); // (* - see the comment below)
+		bindService(service, mServiceConnection, 0); // we pass 0 as a flag so the service will not be created if not exists
 
 		/*
 		 * * - When user exited the UARTActivity while being connected, the log session is kept in the service. We may not get it before binding to it so in this
@@ -244,22 +264,22 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 	}
 
 	@Override
-	protected void onStop() {
-		super.onStop();
+	protected void onPause() {
+		super.onPause();
 
 		try {
 			// We don't want to perform some operations (e.g. disable Battery Level notifications) in the service if we are just rotating the screen.
-			// However, when the activity is finishing, we may want to disable some device features to reduce the battery consumption.
+			// However, when the activity will disappear, we may want to disable some device features to reduce the battery consumption.
 			if (mService != null)
-				mService.setActivityIsFinishing(isFinishing());
+				mService.setActivityIsChangingConfiguration(isChangingConfigurations());
 
-			Logger.d(mLogSession, "Unbinding from the service...");
 			unbindService(mServiceConnection);
 			mService = null;
 
-			Logger.d(mLogSession, "Activity unbinded from the service");
+			Logger.d(mLogSession, "Activity unbound from the service");
 			onServiceUnbinded();
 			mDeviceName = null;
+			mBluetoothDevice = null;
 			mLogSession = null;
 		} catch (final IllegalArgumentException e) {
 			// do nothing, we were not connected to the sensor
@@ -351,7 +371,8 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 	@Override
 	protected void onSaveInstanceState(final Bundle outState) {
 		super.onSaveInstanceState(outState);
-		outState.putString(DEVICE_NAME, mDeviceName);
+		outState.putString(SIS_DEVICE_NAME, mDeviceName);
+		outState.putParcelable(SIS_DEVICE, mBluetoothDevice);
 		if (mLogSession != null)
 			outState.putParcelable(LOG_URI, mLogSession.getSessionUri());
 	}
@@ -359,7 +380,8 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 	@Override
 	protected void onRestoreInstanceState(@NonNull final Bundle savedInstanceState) {
 		super.onRestoreInstanceState(savedInstanceState);
-		mDeviceName = savedInstanceState.getString(DEVICE_NAME);
+		mDeviceName = savedInstanceState.getString(SIS_DEVICE_NAME);
+		mBluetoothDevice = savedInstanceState.getParcelable(SIS_DEVICE);
 	}
 
 	@Override
@@ -405,7 +427,6 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 				setDefaultUI();
 				showDeviceScanningDialog(getFilterUUID());
 			} else {
-				Logger.v(mLogSession, "Disconnecting...");
 				mService.disconnect();
 			}
 		} else {
@@ -441,14 +462,16 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 				mLogSession = LocalLogSession.newSession(getApplicationContext(), getLocalAuthorityLogger(), device.getAddress(), name);
 			}
 		}
+		mBluetoothDevice = device;
 		mDeviceName = name;
 		mDeviceNameView.setText(name != null ? name : getString(R.string.not_available));
-		mConnectButton.setText(R.string.action_disconnect);
+		mConnectButton.setText(R.string.action_connecting);
 
 		// The device may not be in the range but the service will try to connect to it if it reach it
 		Logger.d(mLogSession, "Creating service...");
 		final Intent service = new Intent(this, getServiceClass());
 		service.putExtra(BleProfileService.EXTRA_DEVICE_ADDRESS, device.getAddress());
+		service.putExtra(BleProfileService.EXTRA_DEVICE_NAME, name);
 		if (mLogSession != null)
 			service.putExtra(BleProfileService.EXTRA_LOG_URI, mLogSession.getSessionUri());
 		startService(service);
@@ -461,26 +484,24 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 		// do nothing
 	}
 
-	/**
-	 * Called when the device has been connected. This does not mean that the application may start communication. A service discovery will be handled
-	 * automatically after this call. Service discovery may ends up with calling {@link #onServicesDiscovered(boolean)} or {@link #onDeviceNotSupported()} if required
-	 * services have not been found.
-	 */
-	public void onDeviceConnected() {
+	@Override
+	public void onDeviceConnecting(final BluetoothDevice device) {
+		// empty default implementation
+	}
+
+	@Override
+	public void onDeviceConnected(final BluetoothDevice device) {
 		mDeviceNameView.setText(mDeviceName);
 		mConnectButton.setText(R.string.action_disconnect);
 	}
 
 	@Override
-	public void onDeviceDisconnecting() {
-	// do nothing
+	public void onDeviceDisconnecting(final BluetoothDevice device) {
+		// empty default implementation
 	}
 
-	/**
-	 * Called when the device has disconnected (when the callback returned
-	 * {@link BluetoothGattCallback#onConnectionStateChange(android.bluetooth.BluetoothGatt, int, int)} with state DISCONNECTED.
-	 */
-	public void onDeviceDisconnected() {
+	@Override
+	public void onDeviceDisconnected(final BluetoothDevice device) {
 		mConnectButton.setText(R.string.action_connect);
 		mDeviceNameView.setText(getDefaultDeviceName());
 		if (mBatteryLevelView != null)
@@ -491,81 +512,64 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 			unbindService(mServiceConnection);
 			mService = null;
 
-			Logger.d(mLogSession, "Activity unbinded from the service");
+			Logger.d(mLogSession, "Activity unbound from the service");
 			onServiceUnbinded();
 			mDeviceName = null;
+			mBluetoothDevice = null;
 			mLogSession = null;
 		} catch (final IllegalArgumentException e) {
 			// do nothing. This should never happen but does...
 		}
 	}
 
-	/**
-	 * Some profiles may use this method to notify user that the link was lost. You must call this method in your Ble Manager instead of
-	 * {@link #onDeviceDisconnected()} while you discover disconnection not initiated by the user.
-	 */
-	public void onLinklossOccur() {
+	@Override
+	public void onLinklossOccur(final BluetoothDevice device) {
 		if (mBatteryLevelView != null)
 			mBatteryLevelView.setText(R.string.not_available);
 	}
 
-	/**
-	 * Called when service discovery has finished and primary services has been found. The device is ready to operate. This method is not called if the primary,
-	 * mandatory services were not found during service discovery. For example in the Blood Pressure Monitor, a Blood Pressure service is a primary service and
-	 * Intermediate Cuff Pressure service is a optional secondary service. Existence of battery service is not notified by this call.
-	 *
-	 * @param optionalServicesFound if <code>true</code> the secondary services were also found on the device.
-	 */
-	public abstract void onServicesDiscovered(final boolean optionalServicesFound);
-
-	/**
-	 * Called when the initialization process in completed.
-	 */
-	public void onDeviceReady() {
+	@Override
+	public void onServicesDiscovered(final BluetoothDevice device, final boolean optionalServicesFound) {
 		// empty default implementation
 	}
 
-	/**
-	 * Called when the device has started bonding process
-	 */
-	public void onBondingRequired() {
+	@Override
+	public void onDeviceReady(final BluetoothDevice device) {
 		// empty default implementation
 	}
 
-	/**
-	 * Called when the device has finished bonding process successfully
-	 */
-	public void onBonded() {
+	@Override
+	public void onBondingRequired(final BluetoothDevice device) {
 		// empty default implementation
 	}
 
-	/**
-	 * Called when service discovery has finished but the main services were not found on the device. This may occur when connecting to bonded device that does
-	 * not support required services.
-	 */
-	public void onDeviceNotSupported() {
-		showToast(R.string.not_supported);
+	@Override
+	public void onBonded(final BluetoothDevice device) {
+		// empty default implementation
 	}
 
-	/**
-	 * Called when battery value has been received from the device
-	 *
-	 * @param value the battery value in percent
-	 */
-	public void onBatteryValueReceived(final int value) {
+	@Override
+	public final boolean shouldEnableBatteryLevelNotifications(final BluetoothDevice device) {
+		// This method will never be called.
+		// Please see BleProfileService#shouldEnableBatteryLevelNotifications(BluetoothDevice) instead.
+		throw new UnsupportedOperationException("This method should not be called");
+	}
+
+	@Override
+	public void onBatteryValueReceived(final BluetoothDevice device, final int value) {
 		if (mBatteryLevelView != null)
 			mBatteryLevelView.setText(getString(R.string.battery, value));
 	}
 
-	/**
-	 * Called when a BLE error has occurred
-	 *
-	 * @param message   the error message
-	 * @param errorCode the error code
-	 */
-	public void onError(final String message, final int errorCode) {
+	@Override
+	public void onError(final BluetoothDevice device, final String message, final int errorCode) {
 		DebugLogger.e(TAG, "Error occurred: " + message + ",  error code: " + errorCode);
 		showToast(message + " (" + errorCode + ")");
+	}
+
+	@Override
+	public void onDeviceNotSupported(final BluetoothDevice device) {
+		showToast(R.string.not_supported);
 	}
 
 	/**
@@ -600,7 +604,7 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 	 * Returns <code>true</code> if the device is connected. Services may not have been discovered yet.
 	 */
 	protected boolean isDeviceConnected() {
-		return mService != null;
+		return mService != null && mService.isConnected();
 	}
 
 	/**
@@ -639,6 +643,16 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 	protected abstract UUID getFilterUUID();
 
 	/**
+	 * Checks the {@link BleProfileService#EXTRA_DEVICE} in the given intent and compares it with the connected BluetoothDevice object.
+	 * @param intent intent received via a broadcast from the service
+	 * @return true if the data in the intent apply to the connected device, false otherwise
+	 */
+	protected boolean isBroadcastForThisDevice(final Intent intent) {
+		final BluetoothDevice bluetoothDevice = intent.getParcelableExtra(BleProfileService.EXTRA_DEVICE);
+		return mBluetoothDevice != null && mBluetoothDevice.equals(bluetoothDevice);
+	}
+
+	/**
 	 * Shows the scanner fragment.
 	 *
 	 * @param filter               the UUID filter used to filter out available devices. The fragment will always show all bonded devices as there is no information about their
@@ -655,7 +669,7 @@ public abstract class BleProfileServiceReadyActivity<E extends BleProfileService
 	 *
 	 * @return the logger session or <code>null</code>
 	 */
-	public ILogSession getLogSession() {
+	protected ILogSession getLogSession() {
 		return mLogSession;
 	}
 

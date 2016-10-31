@@ -26,8 +26,8 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
 
+import java.util.Deque;
 import java.util.LinkedList;
-import java.util.Queue;
 import java.util.UUID;
 
 import no.nordicsemi.android.log.Logger;
@@ -71,9 +71,9 @@ public class HTSManager extends BleManager<HTSManagerCallbacks> {
 	private final BleManagerGattCallback mGattCallback = new BleManagerGattCallback() {
 
 		@Override
-		protected Queue<Request> initGatt(final BluetoothGatt gatt) {
+		protected Deque<Request> initGatt(final BluetoothGatt gatt) {
 			final LinkedList<Request> requests = new LinkedList<>();
-			requests.push(Request.newEnableIndicationsRequest(mHTCharacteristic));
+			requests.add(Request.newEnableIndicationsRequest(mHTCharacteristic));
 			return requests;
 		}
 
@@ -93,12 +93,11 @@ public class HTSManager extends BleManager<HTSManagerCallbacks> {
 
 		@Override
 		public void onCharacteristicIndicated(final BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
-			if (mLogSession != null)
-				Logger.a(mLogSession, TemperatureMeasurementParser.parse(characteristic));
+			Logger.a(mLogSession, "\"" + TemperatureMeasurementParser.parse(characteristic) + "\" received");
 
 			try {
 				final double tempValue = decodeTemperature(characteristic.getValue());
-				mCallbacks.onHTValueReceived(tempValue);
+				mCallbacks.onHTValueReceived(gatt.getDevice(), tempValue);
 			} catch (Exception e) {
 				DebugLogger.e(TAG, "Invalid temperature value", e);
 			}
@@ -122,10 +121,10 @@ public class HTSManager extends BleManager<HTSManagerCallbacks> {
 
 		/*
 		 * Conversion of temperature unit from Fahrenheit to Celsius if unit is in Fahrenheit
-		 * Celsius = (98.6*Fahrenheit -32) 5/9
+		 * Celsius = (Fahrenheit -32) 5/9
 		 */
 		if ((flag & FIRST_BIT_MASK) != 0) {
-			temperatureValue = (float) ((98.6 * temperatureValue - 32) * (5 / 9.0));
+			temperatureValue = (float) ((temperatureValue - 32) * (5 / 9.0));
 		}
 		return temperatureValue;
 	}
