@@ -85,6 +85,12 @@ public class BleManager implements BleProfileApi {
 	 * If {@link #shouldAutoConnect()} returns false (default) this is always set to true.
 	 */
 	private boolean mUserDisconnected;
+	/**
+	 * Flag set to true when {@link #shouldAutoConnect()} method returned <code>true</code>. The first connection attempt is done with <code>autoConnect</code>
+	 * flag set to false (to make the first connection quick) but on connection lost the manager will call {@link #connect(BluetoothDevice)} again.
+	 * This time this method will call {@link BluetoothGatt#connect()} which always uses <code>autoConnect</code> equal true.
+	 */
+	private boolean mInitialConnection;
 	/** Flag set to true when the device is connected. */
 	private boolean mConnected;
 	private int mConnectionState = BluetoothGatt.STATE_DISCONNECTED;
@@ -103,8 +109,8 @@ public class BleManager implements BleProfileApi {
 					if (mConnected && previousState != BluetoothAdapter.STATE_TURNING_OFF && previousState != BluetoothAdapter.STATE_OFF) {
 						// The connection is killed by the system, no need to gently disconnect
 						mGattCallback.notifyDeviceDisconnected(mBluetoothDevice);
-						close();
 					}
+					close();
 					break;
 			}
 		}
@@ -175,6 +181,10 @@ public class BleManager implements BleProfileApi {
 	 * <p>This method should only be used with bonded devices, as otherwise the device may change it's address.
 	 * It will however work also with non-bonded devices with private static address. A connection attempt to
 	 * a device with private resolvable address will fail.</p>
+	 * <p>The first connection to a device will always be created with autoConnect flag to false
+	 * (see {@link BluetoothDevice#connectGatt(Context, boolean, BluetoothGattCallback)}). This is to make it quick as the
+	 * user most probably waits for a quick response. However, if this method returned true during first connection and the link was lost,
+	 * the manager will try to reconnect to it using {@link BluetoothGatt#connect()} which forces autoConnect to true .</p>
 	 *
 	 * @return autoConnect flag value
 	 */
@@ -193,8 +203,31 @@ public class BleManager implements BleProfileApi {
 
 		synchronized (mLock) {
 			if (mBluetoothGatt != null) {
-				mBluetoothGatt.close();
-				mBluetoothGatt = null;
+				// There are 2 ways of reconnecting to the same device:
+				// 1. Reusing the same BluetoothGatt object and calling connect() on it or
+				// 2. Closing it and reopening a new instance of BluetoothGatt object.
+				// The gatt.close() is an asynchronous method. It requires some time before it's finished and
+				// device.connectGatt(...) can't be called immediately or service discovery
+				// may never finish on some older devices (Nexus 4, Android 5.0.1).
+				// However, the autoConnect flag settings may have changed. If it did, try closing and opening new BluetoothGatt
+				// despite the difficulties.
+				if (!mInitialConnection) {
+					mBluetoothGatt.close();
+					mBluetoothGatt = null;
+					try {
+						Thread.sleep(200); // Is 200 ms enough?
+					} catch (final InterruptedException e) {
+						// Ignore
+					}
+				} else {
+					// Instead, the gatt.connect() method will be used to reconnect to the same device.
+					// This method forces autoConnect = true even if the gatt was created with this flag set to false.
+					mInitialConnection = false;
+					mConnectionState = BluetoothGatt.STATE_CONNECTING;
+					mCallbacks.onDeviceConnecting(device);
+					mBluetoothGatt.connect();
+					return;
+				}
 			} else {
 				// Register bonding broadcast receiver
 				mContext.registerReceiver(mBluetoothStateBroadcastReceiver, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
@@ -216,6 +249,7 @@ public class BleManager implements BleProfileApi {
 	 */
 	public boolean disconnect() {
 		mUserDisconnected = true;
+		mInitialConnection = false;
 
 		if (mConnected && mBluetoothGatt != null) {
 			mConnectionState = BluetoothGatt.STATE_DISCONNECTING;
@@ -269,10 +303,33 @@ public class BleManager implements BleProfileApi {
 				mBluetoothGatt = null;
 			}
 			mConnected = false;
+			mInitialConnection = false;
 			mConnectionState = BluetoothGatt.STATE_DISCONNECTED;
 			mGattCallback = null;
 			mBluetoothDevice = null;
 		}
+	}
+
+	@Override
+	public final boolean createBond() {
+		return enqueue(Request.createBond());
+	}
+
+	/**
+	 * Creates a bond with the device. The device must be first set using {@link #connect(BluetoothDevice)} which will
+	 * try to connect to the device. If you need to pair with a device before connecting to it you may do it without
+	 * the use of BleManager object and connect after bond is established.
+	 * @return true if pairing has started, false if it was already paired or an immediate error occur.
+	 */
+	private boolean internalCreateBond() {
+		final BluetoothDevice device = mBluetoothDevice;
+		if (device == null)
+			return false;
+
+		if (device.getBondState() == BluetoothDevice.BOND_BONDED)
+			return false;
+
+		return device.createBond();
 	}
 
 	/**
@@ -300,7 +357,7 @@ public class BleManager implements BleProfileApi {
 		if (scCharacteristic == null)
 			return false;
 
-		return enableIndications(scCharacteristic);
+		return internalEnableIndications(scCharacteristic);
 	}
 
 	@Override
@@ -509,7 +566,7 @@ public class BleManager implements BleProfileApi {
 		private final Queue<Request> mTaskQueue = new LinkedList<>();
 		private Deque<Request> mInitQueue;
 		private boolean mInitInProgress;
-		private boolean mOperationInProgress;
+		private boolean mOperationInProgress = true;
 
 		private void notifyDeviceDisconnected(final BluetoothDevice device) {
 			mConnected = false;
@@ -544,18 +601,20 @@ public class BleManager implements BleProfileApi {
 				 * The onConnectionStateChange event is triggered just after the Android connects to a device.
 				 * In case of bonded devices, the encryption is reestablished AFTER this callback is called.
 				 * Moreover, when the device has Service Changed indication enabled, and the list of services has changed (e.g. using the DFU),
-				 * the indication is received few milliseconds later, depending on the connection interval.
-				 * When received, Android will start performing a service discovery operation itself, internally.
+				 * the indication is received few hundred milliseconds later, depending on the connection interval.
+				 * When received, Android will start performing a service discovery operation on its own, internally,
+				 * and will NOT notify the app that services has changed.
 				 *
-				 * If the mBluetoothGatt.discoverServices() method would be invoked here, if would returned cached services,
+				 * If the gatt.discoverServices() method would be invoked here with no delay, if would return cached services,
 				 * as the SC indication wouldn't be received yet.
-				 * Therefore we have to postpone the service discovery operation until we are (almost, as there is no such callback) sure, that it had to be handled.
-				 * Our tests has shown that 600 ms is enough. It is important to call it AFTER receiving the SC indication, but not necessarily
-				 * after Android finishes the internal service discovery.
-				 *
-				 * NOTE: This applies only for bonded devices with Service Changed characteristic, but to be sure we will postpone
-				 * service discovery for all devices.
+				 * Therefore we have to postpone the service discovery operation until we are (almost, as there is no such callback) sure,
+				 * that it has been handled.
+				 * TODO: Please calculate the proper delay that will work in your solution.
+				 * It should be greater than the time from LLCP Feature Exchange to ATT Write for Service Change indication.
+				 * If your device does not use Service Change indication (for example does not have DFU) the delay may be 0.
 				 */
+				final boolean bonded = gatt.getDevice().getBondState() == BluetoothDevice.BOND_BONDED;
+				final int delay = bonded ? 1600 : 0; // around 1600 ms is required when connection interval is ~45ms.
 				mHandler.postDelayed(new Runnable() {
 					@Override
 					public void run() {
@@ -564,11 +623,20 @@ public class BleManager implements BleProfileApi {
 							gatt.discoverServices();
 						}
 					}
-				}, 600);
+				}, delay);
 			} else {
 				if (newState == BluetoothProfile.STATE_DISCONNECTED) {
 					mOperationInProgress = true; // no more calls are possible
-					notifyDeviceDisconnected(gatt.getDevice());
+					mInitQueue = null;
+					mTaskQueue.clear();
+					if (mConnected) {
+						notifyDeviceDisconnected(gatt.getDevice()); // This sets the mConnected flag to false
+					}
+					// Try to reconnect if the initial connection was lost because of a link loss or timeout, and shouldAutoConnect() returned true during connection attempt.
+					// This time it will set the autoConnect flag to true (gatt.connect() forces autoConnect true)
+					if (mInitialConnection) {
+						connect(gatt.getDevice());
+					}
 					return;
 				}
 
@@ -745,6 +813,10 @@ public class BleManager implements BleProfileApi {
 			mOperationInProgress = true;
 			boolean result = false;
 			switch (request.type) {
+				case CREATE_BOND: {
+					result = internalCreateBond();
+					break;
+				}
 				case READ: {
 					result = internalReadCharacteristic(request.characteristic);
 					break;
